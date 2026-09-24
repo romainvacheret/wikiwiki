@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -14,22 +15,47 @@ DEFAULT_MODEL = "ggml-org/gemma-4-E4B-it-GGUF:Q8_0"
 REQUEST_TIMEOUT_SECONDS = 300
 
 
-def _context(results: list[BookResult], max_pages: int = 10) -> str:
-    excerpts = []
+@dataclass(frozen=True)
+class Source:
+    identifier: str
+    title: str
+    chapter: str
+    page: int
+
+    def label(self) -> str:
+        return f"[{self.identifier}] {self.title} — {self.chapter} — page {self.page}"
+
+
+@dataclass(frozen=True)
+class Answer:
+    text: str
+    sources: tuple[Source, ...]
+
+
+def _source_entries(results: list[BookResult], max_pages: int = 10) -> list[tuple[Source, str]]:
+    entries = []
     for result in results:
         for match in result.pages:
-            excerpts.append(
-                f"[{result.title} — {match.chapter} — page {match.page}]\n{match.snippet}"
-            )
-            if len(excerpts) >= max_pages:
-                return "\n\n".join(excerpts)
-    return "\n\n".join(excerpts)
+            identifier = f"S{len(entries) + 1}"
+            source = Source(identifier, result.title, match.chapter, match.page)
+            entries.append((source, match.snippet))
+            if len(entries) >= max_pages:
+                return entries
+    return entries
 
 
-def answer(topic: str, results: list[BookResult]) -> str:
+def _context(results: list[BookResult], max_pages: int = 10) -> str:
+    return "\n\n".join(
+        f"[{source.identifier}] {source.title} — {source.chapter} — page {source.page}\n{snippet}"
+        for source, snippet in _source_entries(results, max_pages)
+    )
+
+
+def answer(topic: str, results: list[BookResult]) -> Answer:
     prompt = f"""Answer the user's question using only the provided excerpts.
 If the excerpts do not contain enough information, say so clearly.
-Do not invent facts or sources. Mention the relevant book and chapter when useful.
+Do not invent facts or sources. Cite every factual claim with one or more source IDs such as [S1].
+Use only the source IDs provided below.
 
 User question:
 {topic}
@@ -88,4 +114,5 @@ Source excerpts:
             "llama.cpp returned empty content "
             f"(finish_reason={finish_reason!r}, message_fields=[{fields}], usage={usage})."
         )
-    return content.strip()
+    entries = _source_entries(results)
+    return Answer(content.strip(), tuple(source for source, _ in entries))

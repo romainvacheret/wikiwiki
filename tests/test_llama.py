@@ -7,5 +7,5 @@ def test_context_contains_source_metadata():
 
     context = _context(results)
 
-    assert "A Book — Chapter 2 — page 12" in context
+    assert "[S1] A Book — Chapter 2 — page 12" in context
     assert "useful text" in context

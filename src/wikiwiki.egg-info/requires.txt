@@ -1,4 +1,0 @@
-PyMuPDF>=1.24
-sentence-transformers>=3.0
-rich>=14.0
-textual>=0.50

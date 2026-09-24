@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import load_or_prompt
 from .index import rebuild, search
+from .llama import answer
 
 
 def main() -> None:
@@ -45,3 +46,14 @@ def main() -> None:
                 print(f"   {chapter} (pages {pages})")
                 for match in matches:
                     print(f"      page {match.page}: {match.snippet}")
+            try:
+                generate = input("Generate an answer from these excerpts? [y/N] ").strip().lower()
+            except EOFError:
+                print()
+                return
+            if generate in {"y", "yes"}:
+                print("\nAnswering...\n")
+                try:
+                    print(answer(topic, results))
+                except RuntimeError as error:
+                    print(f"Unable to generate an answer: {error}")

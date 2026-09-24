@@ -1,0 +1,1 @@
+llama serve -hf ggml-org/gemma-4-E4B-it-GGUF:Q8_0

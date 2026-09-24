@@ -1,0 +1,14 @@
+pyproject.toml
+src/wikiwiki/__init__.py
+src/wikiwiki/calibre.py
+src/wikiwiki/cli.py
+src/wikiwiki/config.py
+src/wikiwiki/embeddings.py
+src/wikiwiki/index.py
+src/wikiwiki.egg-info/PKG-INFO
+src/wikiwiki.egg-info/SOURCES.txt
+src/wikiwiki.egg-info/dependency_links.txt
+src/wikiwiki.egg-info/entry_points.txt
+src/wikiwiki.egg-info/requires.txt
+src/wikiwiki.egg-info/top_level.txt
+tests/test_search.py

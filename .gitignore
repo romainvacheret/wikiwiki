@@ -1,0 +1,5 @@
+.wikiwiki
+.wikiwiki.json
+/docs
+/venv
+*.pyc

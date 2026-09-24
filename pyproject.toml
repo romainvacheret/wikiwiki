@@ -1,0 +1,15 @@
+[project]
+name = "wikiwiki"
+version = "0.1.0"
+description = "Local Calibre book discovery with semantic retrieval"
+requires-python = ">=3.11"
+dependencies = [
+    "PyMuPDF>=1.24",
+    "sentence-transformers>=3.0",
+]
+
+[project.scripts]
+wikiwiki = "wikiwiki.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -34,7 +34,14 @@ def main() -> None:
         if not results:
             print("No matching books found.")
             continue
-        for number, (title, authors) in enumerate(results, start=1):
-            suffix = f" — {authors}" if authors else ""
-            print(f"{number}. {title}{suffix}")
-
+        for number, result in enumerate(results, start=1):
+            suffix = f" — {result.authors}" if result.authors else ""
+            print(f"{number}. {result.title}{suffix}")
+            chapters = {}
+            for match in result.pages:
+                chapters.setdefault(match.chapter, []).append(match)
+            for chapter, matches in chapters.items():
+                pages = ", ".join(str(match.page) for match in matches)
+                print(f"   {chapter} (pages {pages})")
+                for match in matches:
+                    print(f"      page {match.page}: {match.snippet}")

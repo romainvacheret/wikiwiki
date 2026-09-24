@@ -15,8 +15,15 @@ def test_search_ranks_books_by_matching_pages(tmp_path):
             ("cooking recipes", "Cooking Book", "B", "b.pdf", 1, "2"),
         ],
     )
+    rows = db.execute("SELECT rowid, page FROM chunks ORDER BY rowid").fetchall()
+    db.executemany(
+        "INSERT INTO chunk_metadata(rowid, chapter) VALUES (?, ?)",
+        [(rowid, "Chapter 1" if page == 1 else "Chapter 2") for rowid, page in rows],
+    )
     db.commit()
     db.close()
 
-    assert search(path, "event sourcing") == [("Event Book", "A")]
-
+    results = search(path, "event sourcing")
+    assert [(result.title, result.authors) for result in results] == [("Event Book", "A")]
+    assert [match.page for match in results[0].pages] == [1, 2]
+    assert [match.chapter for match in results[0].pages] == ["Chapter 1", "Chapter 2"]

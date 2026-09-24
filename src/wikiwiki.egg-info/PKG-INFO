@@ -6,3 +6,4 @@ Requires-Python: >=3.11
 Requires-Dist: PyMuPDF>=1.24
 Requires-Dist: sentence-transformers>=3.0
 Requires-Dist: rich>=14.0
+Requires-Dist: textual>=0.50

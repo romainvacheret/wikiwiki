@@ -12,6 +12,7 @@ from rich.text import Text
 from .config import load_or_prompt
 from .index import rebuild, search
 from .llama import answer
+from .selector import select_sources
 
 
 def main() -> None:
@@ -69,16 +70,14 @@ def main() -> None:
                 )
             )
         try:
-            generate = console.input(
-                Text("Generate an answer from these excerpts? [y/N] ", style="bold yellow")
-            ).strip().lower()
-        except EOFError:
-            console.print()
-            return
-        if generate in {"y", "yes"}:
+            selected_results = select_sources(results)
+        except ImportError:
+            console.print(Panel("The source selector requires Textual. Run: python3 -m pip install -e .", title="[bold red]Missing dependency[/]", border_style="red"))
+            continue
+        if selected_results:
             try:
                 with console.status("[bold green]Generating answer...[/]", spinner="dots"):
-                    generated = answer(topic, results)
+                    generated = answer(topic, selected_results)
                 console.print(Panel(Markdown(generated.text), title="[bold green]Answer[/]", border_style="green", padding=(1, 2)))
                 sources = []
                 for source in generated.sources:
@@ -86,4 +85,6 @@ def main() -> None:
                 console.print(Panel(Group(*sources), title="[bold]Sources[/]", border_style="yellow"))
             except RuntimeError as error:
                 console.print(Panel(f"Unable to generate an answer: {error}", title="[bold red]Error[/]", border_style="red"))
+        elif selected_results == []:
+            console.print(Panel("No sources selected; answer generation skipped.", border_style="yellow"))
         console.print()

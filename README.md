@@ -120,10 +120,23 @@ wikiwiki/
 
 ## Testing
 
+Install development tools with:
+
+```bash
+python3 -m pip install -e ".[dev]"
+```
+
 Run the test suite with:
 
 ```bash
 python3 -m pytest
+```
+
+Format and lint the project with:
+
+```bash
+ruff format .
+ruff check .
 ```
 
 The current tests cover SQLite retrieval, source metadata, and RAG context construction.

@@ -8,6 +8,11 @@ from pathlib import Path
 from .calibre import Book, books
 
 
+SEMANTIC_WEIGHT = 0.7
+KEYWORD_WEIGHT = 0.3
+RRF_K = 60
+
+
 @dataclass(frozen=True)
 class PageMatch:
     page: int
@@ -135,58 +140,96 @@ def _snippet(text: str, maximum: int = 240) -> str:
     return compact[: maximum - 1].rsplit(" ", 1)[0] + "…"
 
 
+def _book_results(
+    rows: list[tuple[str, str, int, str, str, float]],
+    limit: int,
+    pages_per_book: int,
+) -> list[BookResult]:
+    grouped: dict[tuple[str, str], list[PageMatch]] = {}
+    for title, authors, page, chapter, text, score in rows:
+        key = (title, authors)
+        grouped.setdefault(key, []).append(PageMatch(page, chapter, _snippet(text), score))
+    ranked = sorted(
+        grouped.items(),
+        key=lambda item: (-max(match.score for match in item[1]), item[0][0].lower()),
+    )[:limit]
+    return [
+        BookResult(
+            title,
+            authors,
+            tuple(sorted(matches, key=lambda match: -match.score)[:pages_per_book]),
+        )
+        for (title, authors), matches in ranked
+    ]
+
+
 def search(index_path: Path, topic: str, limit: int = 10, pages_per_book: int = 3) -> list[BookResult]:
     db = sqlite3.connect(index_path)
     try:
+        lexical_rows = db.execute(
+            """
+            SELECT chunks.rowid, chunks.title, chunks.authors, chunks.page,
+                   metadata.chapter, chunks.text, bm25(chunks) AS rank
+            FROM chunks
+            JOIN chunk_metadata metadata ON metadata.rowid = chunks.rowid
+            WHERE chunks MATCH ?
+            ORDER BY rank, chunks.title COLLATE NOCASE
+            """,
+            (topic,),
+        ).fetchall()
         vector_count = db.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
         if vector_count:
             try:
                 from .embeddings import cosine, query
 
                 topic_vector = query(topic)
-                rows = db.execute(
+                semantic_rows = db.execute(
                     """
-                    SELECT c.title, c.authors, c.page, metadata.chapter, c.text, cosine_vector.vector
+                    SELECT c.rowid, c.title, c.authors, c.page, metadata.chapter, c.text, cosine_vector.vector
                     FROM chunks c
                     JOIN chunk_metadata metadata ON metadata.rowid = c.rowid
                     JOIN vectors cosine_vector ON cosine_vector.rowid = c.rowid
                     """
                 ).fetchall()
-                grouped: dict[tuple[str, str], list[PageMatch]] = {}
-                for title, authors, page, chapter, text, vector in rows:
-                    key = (title, authors)
-                    grouped.setdefault(key, []).append(
-                        PageMatch(page, chapter, _snippet(text), cosine(vector, topic_vector))
+                semantic_scores = {
+                    row[0]: cosine(row[6], topic_vector)
+                    for row in semantic_rows
+                }
+                semantic_rank = {
+                    rowid: rank
+                    for rank, (rowid, _) in enumerate(
+                        sorted(semantic_scores.items(), key=lambda item: -item[1]),
+                        start=1,
                     )
-                ranked = sorted(
-                    grouped.items(),
-                    key=lambda item: (-max(match.score for match in item[1]), item[0][0].lower()),
-                )[:limit]
-                return [
-                    BookResult(title, authors, tuple(sorted(matches, key=lambda match: -match.score)[:pages_per_book]))
-                    for (title, authors), matches in ranked
-                ]
+                }
+                keyword_rank = {
+                    row[0]: rank for rank, row in enumerate(lexical_rows, start=1)
+                }
+                row_by_id = {row[0]: row for row in semantic_rows}
+                for row in lexical_rows:
+                    row_by_id.setdefault(row[0], row)
+
+                combined = []
+                for rowid, row in row_by_id.items():
+                    score = 0.0
+                    if rowid in semantic_rank:
+                        score += SEMANTIC_WEIGHT / (RRF_K + semantic_rank[rowid])
+                    if rowid in keyword_rank:
+                        score += KEYWORD_WEIGHT / (RRF_K + keyword_rank[rowid])
+                    if rowid in semantic_scores:
+                        title, authors, page, chapter, text = row[1:6]
+                    else:
+                        _, title, authors, page, chapter, text, _ = row
+                    combined.append((title, authors, page, chapter, text, score))
+                combined.sort(key=lambda row: (-row[5], row[0].lower()))
+                return _book_results(combined, limit, pages_per_book)
             except (ImportError, ModuleNotFoundError):
                 pass
-        rows = db.execute(
-            """
-            SELECT chunks.title, chunks.authors, chunks.page, metadata.chapter, chunks.text, bm25(chunks) AS rank
-            FROM chunks
-            JOIN chunk_metadata metadata ON metadata.rowid = chunks.rowid
-            WHERE chunks MATCH ?
-            ORDER BY rank, title COLLATE NOCASE
-            """,
-            (topic,),
-        ).fetchall()
     finally:
         db.close()
 
-    grouped: dict[tuple[str, str], list[PageMatch]] = {}
-    for title, authors, page, chapter, text, rank in rows:
-        key = (title, authors)
-        grouped.setdefault(key, []).append(PageMatch(page, chapter, _snippet(text), -rank))
-    ranked = sorted(grouped.items(), key=lambda item: (-max(match.score for match in item[1]), item[0][0].lower()))[:limit]
-    return [
-        BookResult(title, authors, tuple(matches[:pages_per_book]))
-        for (title, authors), matches in ranked
-    ]
+    return _book_results(
+        [(title, authors, page, chapter, text, -rank) for _, title, authors, page, chapter, text, rank in lexical_rows],
+        limit,
+        pages_per_book,
+    )

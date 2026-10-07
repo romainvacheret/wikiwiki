@@ -9,7 +9,7 @@ The project is designed as an incremental research assistant: retrieval results 
 - Calibre library support through its local `metadata.db`.
 - PDF-only indexing with page-based text extraction.
 - Persistent SQLite index with incremental re-indexing.
-- Local semantic embeddings with SQLite FTS fallback.
+- Hybrid semantic and keyword retrieval using local embeddings and SQLite FTS.
 - Book, chapter, page, and excerpt retrieval.
 - Hierarchical source selection before answer generation.
 - Source IDs and book/chapter/page references in RAG answers.

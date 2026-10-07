@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .calibre import Book, books
+from .embeddings import cosine, encode, query
+from .pdf import ExtractedPage, extract_pages
 
 
 SEMANTIC_WEIGHT = 0.7
@@ -26,6 +28,22 @@ class BookResult:
     title: str
     authors: str
     pages: tuple[PageMatch, ...]
+
+
+@dataclass(frozen=True)
+class IndexedChunk:
+    rowid: int
+    title: str
+    authors: str
+    page: int
+    chapter: str
+    text: str
+
+
+@dataclass(frozen=True)
+class RankedChunk:
+    chunk: IndexedChunk
+    score: float
 
 
 SCHEMA = """
@@ -51,86 +69,126 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
 """
 
 
+def connect(index_path: Path) -> sqlite3.Connection:
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    database = sqlite3.connect(index_path)
+    database.executescript(SCHEMA)
+    return database
+
+
 def fingerprint(path: Path) -> str:
     stat = path.stat()
-    return hashlib.sha256(f"{path}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()
+    value = f"{path}:{stat.st_size}:{stat.st_mtime_ns}"
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
-def extract_pages(path: Path):
-    import pymupdf
+def _has_metadata(database: sqlite3.Connection, book_id: int) -> bool:
+    row = database.execute(
+        "SELECT 1 FROM chunk_metadata m JOIN chunks c ON c.rowid = m.rowid "
+        "WHERE c.book_id = ? LIMIT 1",
+        (str(book_id),),
+    ).fetchone()
+    return row is not None
 
-    document = pymupdf.open(path)
-    try:
-        toc = document.get_toc(simple=True)
-        chapters = [
-            (entry[2], entry[1])
-            for entry in toc
-            if len(entry) >= 3 and entry[0] <= 2 and entry[2] > 0
-        ]
-        for page_number, page in enumerate(document, start=1):
-            text = page.get_text("text").strip()
-            if text:
-                chapter = "Unknown chapter"
-                for chapter_page, title in chapters:
-                    if chapter_page <= page_number:
-                        chapter = title
-                    else:
-                        break
-                yield page_number, chapter, text
-    finally:
-        document.close()
+
+def _has_vectors(database: sqlite3.Connection, book_id: int) -> bool:
+    row = database.execute(
+        "SELECT 1 FROM vectors WHERE book_id = ? LIMIT 1",
+        (book_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _needs_reindex(
+    database: sqlite3.Connection,
+    book: Book,
+    current_fingerprint: str,
+) -> bool:
+    row = database.execute(
+        "SELECT fingerprint FROM documents WHERE book_id = ?",
+        (book.calibre_id,),
+    ).fetchone()
+    return not (
+        row
+        and row[0] == current_fingerprint
+        and _has_metadata(database, book.calibre_id)
+        and _has_vectors(database, book.calibre_id)
+    )
+
+
+def _clear_book(database: sqlite3.Connection, book_id: int) -> None:
+    database.execute(
+        "DELETE FROM chunk_metadata WHERE rowid IN "
+        "(SELECT rowid FROM chunks WHERE book_id = ?)",
+        (str(book_id),),
+    )
+    database.execute("DELETE FROM chunks WHERE book_id = ?", (str(book_id),))
+    database.execute("DELETE FROM vectors WHERE book_id = ?", (book_id,))
+    database.execute("DELETE FROM documents WHERE book_id = ?", (book_id,))
+
+
+def _save_book(
+    database: sqlite3.Connection,
+    book: Book,
+    pages: list[ExtractedPage],
+    vectors: list[bytes],
+    file_fingerprint: str,
+) -> None:
+    database.execute(
+        "INSERT INTO documents VALUES (?, ?, ?, ?, ?)",
+        (book.calibre_id, book.title, book.authors, str(book.pdf_path), file_fingerprint),
+    )
+    for position, page in enumerate(pages):
+        database.execute(
+            "INSERT INTO chunks(text, title, authors, path, page, book_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                page.text,
+                book.title,
+                book.authors,
+                str(book.pdf_path),
+                page.number,
+                str(book.calibre_id),
+            ),
+        )
+        chunk_rowid = database.execute("SELECT last_insert_rowid()").fetchone()[0]
+        database.execute(
+            "INSERT INTO chunk_metadata(rowid, chapter) VALUES (?, ?)",
+            (chunk_rowid, page.chapter),
+        )
+        if vectors:
+            database.execute(
+                "INSERT INTO vectors(rowid, book_id, vector) VALUES (?, ?, ?)",
+                (chunk_rowid, book.calibre_id, vectors[position]),
+            )
+
+
+def _index_book(
+    database: sqlite3.Connection,
+    book: Book,
+    encoder,
+) -> None:
+    file_fingerprint = fingerprint(book.pdf_path)
+    if not _needs_reindex(database, book, file_fingerprint):
+        return
+
+    _clear_book(database, book.calibre_id)
+    pages = extract_pages(book.pdf_path)
+    vectors = encoder([page.text for page in pages]) if encoder else []
+    _save_book(database, book, pages, vectors, file_fingerprint)
 
 
 def rebuild(library: Path, index_path: Path) -> int:
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(index_path)
-    db.executescript(SCHEMA)
-    count = 0
+    database = connect(index_path)
+    indexed_books = 0
     try:
-        try:
-            from .embeddings import encode
-        except ImportError:
-            encode = None
         for book in books(library):
-            current = fingerprint(book.pdf_path)
-            old = db.execute("SELECT fingerprint FROM documents WHERE book_id = ?", (book.calibre_id,)).fetchone()
-            metadata_exists = db.execute(
-                "SELECT 1 FROM chunk_metadata m JOIN chunks c ON c.rowid = m.rowid WHERE c.book_id = ? LIMIT 1",
-                (str(book.calibre_id),),
-            ).fetchone()
-            if old and old[0] == current and metadata_exists:
-                count += 1
-                continue
-            db.execute(
-                "DELETE FROM chunk_metadata WHERE rowid IN (SELECT rowid FROM chunks WHERE book_id = ?)",
-                (str(book.calibre_id),),
-            )
-            db.execute("DELETE FROM chunks WHERE book_id = ?", (str(book.calibre_id),))
-            db.execute("DELETE FROM vectors WHERE book_id = ?", (book.calibre_id,))
-            db.execute("DELETE FROM documents WHERE book_id = ?", (book.calibre_id,))
-            db.execute(
-                "INSERT INTO documents VALUES (?, ?, ?, ?, ?)",
-                (book.calibre_id, book.title, book.authors, str(book.pdf_path), current),
-            )
-            pages = list(extract_pages(book.pdf_path))
-            vectors = encode([text for _, _, text in pages]) if encode else []
-            for position, (page, chapter, text) in enumerate(pages):
-                db.execute(
-                    "INSERT INTO chunks(text, title, authors, path, page, book_id) VALUES (?, ?, ?, ?, ?, ?)",
-                    (text, book.title, book.authors, str(book.pdf_path), page, str(book.calibre_id)),
-                )
-                chunk_rowid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-                db.execute("INSERT INTO chunk_metadata(rowid, chapter) VALUES (?, ?)", (chunk_rowid, chapter))
-                if vectors:
-                    db.execute(
-                        "INSERT INTO vectors(rowid, book_id, vector) VALUES (?, ?, ?)",
-                        (chunk_rowid, book.calibre_id, vectors[position]),
-                    )
-            count += 1
-        db.commit()
+            _index_book(database, book, encode)
+            indexed_books += 1
+        database.commit()
     finally:
-        db.close()
-    return count
+        database.close()
+    return indexed_books
 
 
 def _snippet(text: str, maximum: int = 240) -> str:
@@ -140,96 +198,152 @@ def _snippet(text: str, maximum: int = 240) -> str:
     return compact[: maximum - 1].rsplit(" ", 1)[0] + "…"
 
 
+def _load_keyword_matches(
+    database: sqlite3.Connection,
+    topic: str,
+) -> list[tuple[IndexedChunk, float]]:
+    rows = database.execute(
+        """
+        SELECT chunks.rowid, chunks.title, chunks.authors, chunks.page,
+               metadata.chapter, chunks.text, bm25(chunks) AS rank
+        FROM chunks
+        JOIN chunk_metadata metadata ON metadata.rowid = chunks.rowid
+        WHERE chunks MATCH ?
+        ORDER BY rank, chunks.title COLLATE NOCASE
+        """,
+        (topic,),
+    ).fetchall()
+    return [
+        (
+            IndexedChunk(rowid, title, authors, page, chapter, text),
+            -rank,
+        )
+        for rowid, title, authors, page, chapter, text, rank in rows
+    ]
+
+
+def _load_semantic_matches(
+    database: sqlite3.Connection,
+    topic: str,
+) -> list[tuple[IndexedChunk, float]]:
+    topic_vector = query(topic)
+    rows = database.execute(
+        """
+        SELECT c.rowid, c.title, c.authors, c.page, metadata.chapter,
+               c.text, vectors.vector
+        FROM chunks c
+        JOIN chunk_metadata metadata ON metadata.rowid = c.rowid
+        JOIN vectors ON vectors.rowid = c.rowid
+        """
+    ).fetchall()
+    return [
+        (
+            IndexedChunk(rowid, title, authors, page, chapter, text),
+            cosine(vector, topic_vector),
+        )
+        for rowid, title, authors, page, chapter, text, vector in rows
+    ]
+
+
+def _reciprocal_rank(rank: int) -> float:
+    return 1 / (RRF_K + rank)
+
+
+def _combine_matches(
+    semantic_matches: list[tuple[IndexedChunk, float]],
+    keyword_matches: list[tuple[IndexedChunk, float]],
+) -> list[RankedChunk]:
+    semantic_by_id = {chunk.rowid: chunk for chunk, _ in semantic_matches}
+    keyword_by_id = {chunk.rowid: chunk for chunk, _ in keyword_matches}
+    semantic_rank = {
+        chunk.rowid: rank
+        for rank, (chunk, _) in enumerate(
+            sorted(semantic_matches, key=lambda item: -item[1]),
+            start=1,
+        )
+    }
+    keyword_rank = {
+        chunk.rowid: rank
+        for rank, (chunk, _) in enumerate(keyword_matches, start=1)
+    }
+
+    ranked = []
+    for rowid in semantic_by_id.keys() | keyword_by_id.keys():
+        score = 0.0
+        if rowid in semantic_rank:
+            score += SEMANTIC_WEIGHT * _reciprocal_rank(semantic_rank[rowid])
+        if rowid in keyword_rank:
+            score += KEYWORD_WEIGHT * _reciprocal_rank(keyword_rank[rowid])
+        chunk = semantic_by_id.get(rowid) or keyword_by_id[rowid]
+        ranked.append(RankedChunk(chunk, score))
+    return sorted(ranked, key=lambda item: (-item.score, item.chunk.title.lower()))
+
+
 def _book_results(
-    rows: list[tuple[str, str, int, str, str, float]],
+    ranked_chunks: list[RankedChunk],
     limit: int,
     pages_per_book: int,
 ) -> list[BookResult]:
-    grouped: dict[tuple[str, str], list[PageMatch]] = {}
-    for title, authors, page, chapter, text, score in rows:
-        key = (title, authors)
-        grouped.setdefault(key, []).append(PageMatch(page, chapter, _snippet(text), score))
-    ranked = sorted(
+    grouped: dict[tuple[str, str], list[RankedChunk]] = {}
+    for ranked in ranked_chunks:
+        key = (ranked.chunk.title, ranked.chunk.authors)
+        grouped.setdefault(key, []).append(ranked)
+
+    ranked_books = sorted(
         grouped.items(),
-        key=lambda item: (-max(match.score for match in item[1]), item[0][0].lower()),
+        key=lambda item: (-max(page.score for page in item[1]), item[0][0].lower()),
     )[:limit]
     return [
         BookResult(
             title,
             authors,
-            tuple(sorted(matches, key=lambda match: -match.score)[:pages_per_book]),
+            tuple(
+                PageMatch(
+                    page=page.chunk.page,
+                    chapter=page.chunk.chapter,
+                    snippet=_snippet(page.chunk.text),
+                    score=page.score,
+                )
+                for page in sorted(matches, key=lambda item: -item.score)[:pages_per_book]
+            ),
         )
-        for (title, authors), matches in ranked
+        for (title, authors), matches in ranked_books
     ]
 
 
-def search(index_path: Path, topic: str, limit: int = 10, pages_per_book: int = 3) -> list[BookResult]:
-    db = sqlite3.connect(index_path)
+def search(
+    index_path: Path,
+    topic: str,
+    limit: int = 10,
+    pages_per_book: int = 3,
+) -> list[BookResult]:
+    database = connect(index_path)
     try:
-        lexical_rows = db.execute(
-            """
-            SELECT chunks.rowid, chunks.title, chunks.authors, chunks.page,
-                   metadata.chapter, chunks.text, bm25(chunks) AS rank
-            FROM chunks
-            JOIN chunk_metadata metadata ON metadata.rowid = chunks.rowid
-            WHERE chunks MATCH ?
-            ORDER BY rank, chunks.title COLLATE NOCASE
-            """,
-            (topic,),
-        ).fetchall()
-        vector_count = db.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
-        if vector_count:
-            try:
-                from .embeddings import cosine, query
-
-                topic_vector = query(topic)
-                semantic_rows = db.execute(
-                    """
-                    SELECT c.rowid, c.title, c.authors, c.page, metadata.chapter, c.text, cosine_vector.vector
-                    FROM chunks c
-                    JOIN chunk_metadata metadata ON metadata.rowid = c.rowid
-                    JOIN vectors cosine_vector ON cosine_vector.rowid = c.rowid
-                    """
-                ).fetchall()
-                semantic_scores = {
-                    row[0]: cosine(row[6], topic_vector)
-                    for row in semantic_rows
-                }
-                semantic_rank = {
-                    rowid: rank
-                    for rank, (rowid, _) in enumerate(
-                        sorted(semantic_scores.items(), key=lambda item: -item[1]),
-                        start=1,
-                    )
-                }
-                keyword_rank = {
-                    row[0]: rank for rank, row in enumerate(lexical_rows, start=1)
-                }
-                row_by_id = {row[0]: row for row in semantic_rows}
-                for row in lexical_rows:
-                    row_by_id.setdefault(row[0], row)
-
-                combined = []
-                for rowid, row in row_by_id.items():
-                    score = 0.0
-                    if rowid in semantic_rank:
-                        score += SEMANTIC_WEIGHT / (RRF_K + semantic_rank[rowid])
-                    if rowid in keyword_rank:
-                        score += KEYWORD_WEIGHT / (RRF_K + keyword_rank[rowid])
-                    if rowid in semantic_scores:
-                        title, authors, page, chapter, text = row[1:6]
-                    else:
-                        _, title, authors, page, chapter, text, _ = row
-                    combined.append((title, authors, page, chapter, text, score))
-                combined.sort(key=lambda row: (-row[5], row[0].lower()))
-                return _book_results(combined, limit, pages_per_book)
-            except (ImportError, ModuleNotFoundError):
-                pass
+        keyword_matches = _load_keyword_matches(database, topic)
+        vector_count = database.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        if not vector_count:
+            raise RuntimeError(
+                "The index contains no embeddings. Run `wikiwiki index` to build them."
+            )
+        ranked_chunks = _combine_matches(
+            _load_semantic_matches(database, topic),
+            keyword_matches,
+        )
+        return _book_results(ranked_chunks, limit, pages_per_book)
     finally:
-        db.close()
+        database.close()
 
-    return _book_results(
-        [(title, authors, page, chapter, text, -rank) for _, title, authors, page, chapter, text, rank in lexical_rows],
-        limit,
-        pages_per_book,
-    )
+
+__all__ = [
+    "BookResult",
+    "IndexedChunk",
+    "PageMatch",
+    "RankedChunk",
+    "SCHEMA",
+    "_book_results",
+    "_combine_matches",
+    "_snippet",
+    "fingerprint",
+    "rebuild",
+    "search",
+]

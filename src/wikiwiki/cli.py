@@ -15,6 +15,48 @@ from .llama import answer
 from .selector import select_sources
 
 
+def display_answer(console: Console, generated) -> None:
+    console.print(
+        Panel(
+            Markdown(generated.text),
+            title="[bold green]Answer[/]",
+            border_style="green",
+            padding=(1, 2),
+        )
+    )
+    sources = [Text(source.label(), style="dim") for source in generated.sources]
+    console.print(Panel(Group(*sources), title="[bold]Sources[/]", border_style="yellow"))
+
+
+def follow_up_loop(console: Console, topic: str, selected_results, generated) -> None:
+    history = [(topic, generated.text)]
+    while True:
+        try:
+            follow_up = console.input(
+                Text("Follow-up question (or /new) > ", style="bold cyan")
+            ).strip()
+        except EOFError:
+            console.print()
+            return
+        if not follow_up:
+            continue
+        if follow_up == "/new":
+            return
+        try:
+            with console.status("[bold green]Generating follow-up answer...[/]", spinner="dots"):
+                next_answer = answer(follow_up, selected_results, history)
+            display_answer(console, next_answer)
+            history.append((follow_up, next_answer.text))
+        except RuntimeError as error:
+            console.print(
+                Panel(
+                    f"Unable to generate an answer: {error}",
+                    title="[bold red]Error[/]",
+                    border_style="red",
+                )
+            )
+
+
 def main() -> None:
     console = Console()
     parser = argparse.ArgumentParser(prog="wikiwiki")
@@ -78,11 +120,8 @@ def main() -> None:
             try:
                 with console.status("[bold green]Generating answer...[/]", spinner="dots"):
                     generated = answer(topic, selected_results)
-                console.print(Panel(Markdown(generated.text), title="[bold green]Answer[/]", border_style="green", padding=(1, 2)))
-                sources = []
-                for source in generated.sources:
-                    sources.append(Text(source.label(), style="dim"))
-                console.print(Panel(Group(*sources), title="[bold]Sources[/]", border_style="yellow"))
+                display_answer(console, generated)
+                follow_up_loop(console, topic, selected_results, generated)
             except RuntimeError as error:
                 console.print(Panel(f"Unable to generate an answer: {error}", title="[bold red]Error[/]", border_style="red"))
         elif selected_results == []:

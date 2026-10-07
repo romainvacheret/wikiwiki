@@ -51,18 +51,31 @@ def _context(results: list[BookResult], max_pages: int = 10) -> str:
     )
 
 
-def answer(topic: str, results: list[BookResult]) -> Answer:
-    prompt = f"""Answer the user's question using only the provided excerpts.
+def _prompt(topic: str, results: list[BookResult], history: list[tuple[str, str]] | None = None) -> str:
+    previous = ""
+    if history:
+        previous = "\n\nPrevious conversation:\n" + "\n\n".join(
+            f"User: {question}\nAssistant: {response}" for question, response in history
+        )
+    return f"""Answer the user's question using only the provided excerpts.
 If the excerpts do not contain enough information, say so clearly.
 Do not invent facts or sources. Cite every factual claim with one or more source IDs such as [S1].
 Use only the source IDs provided below.
 
 User question:
-{topic}
+{topic}{previous}
 
 Source excerpts:
 {_context(results)}
 """
+
+
+def answer(
+    topic: str,
+    results: list[BookResult],
+    history: list[tuple[str, str]] | None = None,
+) -> Answer:
+    prompt = _prompt(topic, results, history)
     payload = {
         "model": os.environ.get("WIKIWIKI_LLAMA_MODEL", DEFAULT_MODEL),
         "messages": [

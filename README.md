@@ -12,6 +12,7 @@ The project is designed as an incremental research assistant: retrieval results 
 - Hybrid semantic and keyword retrieval using local embeddings and SQLite FTS.
 - Book, chapter, page, and excerpt retrieval.
 - Hierarchical source selection before answer generation.
+- Follow-up questions over the selected source context.
 - Source IDs and book/chapter/page references in RAG answers.
 - Local llama.cpp model integration.
 - Rich terminal output and a Textual source-selection interface.
@@ -64,6 +65,8 @@ wikiwiki
 On the first run, Wikiwiki asks for the path to the Calibre library. It indexes the PDFs automatically and stores configuration in `.wikiwiki.json` and the search index in `.wikiwiki/index.sqlite3`.
 
 Enter a natural-language topic at the prompt. Wikiwiki displays matching books and excerpts, then opens a source selector where books, chapters, and individual pages can be selected or unselected before generating an answer.
+
+After an answer, follow-up questions reuse the selected sources and conversation context. Enter `/new` to return to a fresh topic.
 
 llama.cpp is only required for answer generation. Book and excerpt retrieval can run without the model server.
 
